@@ -1,3 +1,6 @@
+/** @format */
+
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { browserName, detectOS } from 'detect-browser';
 import ipaddr from 'ipaddr.js';
@@ -63,7 +66,16 @@ function decodeHeader(s: string | undefined | null): string | undefined | null {
 export async function getLocation(ip: string = '', headers: Headers, hasPayloadIP: boolean) {
   // Ignore local ips
   if (!ip || (await isLocalhost(ip))) {
+    if (process.env.DEBUG_GEO) {
+      // eslint-disable-next-line no-console
+      console.log(`[GEO] Skipping localhost IP: ${ip}`);
+    }
     return null;
+  }
+
+  if (process.env.DEBUG_GEO) {
+    // eslint-disable-next-line no-console
+    console.log(`[GEO] Looking up location for IP: ${ip}`);
   }
 
   if (!hasPayloadIP && !process.env.SKIP_LOCATION_HEADERS) {
@@ -73,6 +85,13 @@ export async function getLocation(ip: string = '', headers: Headers, hasPayloadI
         const country = decodeHeader(countryHeader);
         const region = decodeHeader(headers.get(provider.regionHeader));
         const city = decodeHeader(headers.get(provider.cityHeader));
+
+        if (process.env.DEBUG_GEO) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[GEO] Found location from ${provider.countryHeader}: ${country}, ${region}, ${city}`,
+          );
+        }
 
         return {
           country,
@@ -85,19 +104,54 @@ export async function getLocation(ip: string = '', headers: Headers, hasPayloadI
 
   // Database lookup
   if (!globalThis[MAXMIND]) {
-    const dir = path.join(process.cwd(), 'geo');
+    try {
+      const dir = path.join(process.cwd(), 'geo');
+      const dbPath = process.env.GEOLITE_DB_PATH || path.resolve(dir, 'GeoLite2-City.mmdb');
 
-    globalThis[MAXMIND] = await maxmind.open(
-      process.env.GEOLITE_DB_PATH || path.resolve(dir, 'GeoLite2-City.mmdb'),
-    );
+      if (process.env.DEBUG_GEO) {
+        // eslint-disable-next-line no-console
+        console.log(`[GEO] Opening database at: ${dbPath}`);
+      }
+
+      // Check if file exists
+      try {
+        await fs.access(dbPath);
+      } catch {
+        // eslint-disable-next-line no-console
+        console.error(`GeoLite2 database file not found at: ${dbPath}`);
+        return null;
+      }
+
+      globalThis[MAXMIND] = await maxmind.open(dbPath);
+      if (process.env.DEBUG_GEO) {
+        // eslint-disable-next-line no-console
+        console.log(`[GEO] Database opened successfully`);
+      }
+    } catch (error) {
+      // Database file not found or cannot be opened
+      // eslint-disable-next-line no-console
+      console.error('Failed to open GeoLite2 database:', error);
+      return null;
+    }
   }
 
-  const result = globalThis[MAXMIND]?.get(stripPort(ip));
+  const strippedIp = stripPort(ip);
+  const result = globalThis[MAXMIND]?.get(strippedIp);
+
+  if (process.env.DEBUG_GEO) {
+    // eslint-disable-next-line no-console
+    console.log(`[GEO] Database lookup for ${strippedIp}: ${result ? 'found' : 'not found'}`);
+  }
 
   if (result) {
     const country = result.country?.iso_code ?? result?.registered_country?.iso_code;
     const region = result.subdivisions?.[0]?.iso_code;
     const city = result.city?.names?.en;
+
+    if (process.env.DEBUG_GEO) {
+      // eslint-disable-next-line no-console
+      console.log(`[GEO] Result: country=${country}, region=${region}, city=${city}`);
+    }
 
     return {
       country,
@@ -105,15 +159,34 @@ export async function getLocation(ip: string = '', headers: Headers, hasPayloadI
       city,
     };
   }
+
+  // Return null explicitly if no result found
+  if (process.env.DEBUG_GEO) {
+    // eslint-disable-next-line no-console
+    console.log(`[GEO] No location data found for IP: ${ip}`);
+  }
+  return null;
 }
 
 export async function getClientInfo(request: Request, payload: Record<string, any>) {
   const userAgent = payload?.userAgent || request.headers.get('user-agent');
   const ip = payload?.ip || getIpAddress(request.headers);
+
+  if (process.env.DEBUG_GEO) {
+    // eslint-disable-next-line no-console
+    console.log(`[GEO] getClientInfo - IP: ${ip}, hasPayloadIP: ${!!payload?.ip}`);
+  }
+
   const location = await getLocation(ip, request.headers, !!payload?.ip);
-  const country = safeDecodeURIComponent(location?.country);
-  const region = safeDecodeURIComponent(location?.region);
-  const city = safeDecodeURIComponent(location?.city);
+  const country = safeDecodeURIComponent(location?.country) || undefined;
+  const region = safeDecodeURIComponent(location?.region) || undefined;
+  const city = safeDecodeURIComponent(location?.city) || undefined;
+
+  if (process.env.DEBUG_GEO) {
+    // eslint-disable-next-line no-console
+    console.log(`[GEO] Final result - country: ${country}, region: ${region}, city: ${city}`);
+  }
+
   const browser = payload?.browser ?? browserName(userAgent);
   const os = payload?.os ?? (detectOS(userAgent) as string);
   const device = payload?.device ?? getDevice(userAgent, payload?.screen);
