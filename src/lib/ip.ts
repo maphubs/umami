@@ -7,13 +7,14 @@ export const IP_ADDRESS_HEADERS = [
   'fastly-client-ip', // Fastly
   'x-nf-client-connection-ip', // Netlify
   'do-connecting-ip', // Digital Ocean
-  'x-real-ip', // Reverse proxy
+  'x-forwarded-for', // Most common - check before x-real-ip (which may contain internal IP)
   'x-appengine-user-ip', // Google App Engine
-  'x-forwarded-for',
+  'x-real-ip', // Reverse proxy / Nginx (may contain internal IP, so check after x-forwarded-for)
   'forwarded',
   'x-client-ip',
   'x-cluster-client-ip',
   'x-forwarded',
+  'x-original-forwarded-for', // Some proxies
 ];
 
 /**
@@ -63,33 +64,109 @@ function resolveIp(ip?: string | null) {
   }
 }
 
+/**
+ * Detect private/internal IPs that should not be treated as the real client IP
+ * (RFC1918 ranges, loopback, link-local).
+ */
+function isPrivateIp(ip: string) {
+  return (
+    ip.startsWith('10.') ||
+    /^172\.(1[6-9]|2[0-9]|3[01])\./.test(ip) ||
+    ip.startsWith('192.168.') ||
+    ip.startsWith('127.') ||
+    ip === '::1' ||
+    ip.startsWith('169.254.') // Link-local
+  );
+}
+
 export function getIpAddress(headers: Headers) {
   const customHeader = process.env.CLIENT_IP_HEADER;
 
   if (customHeader && headers.get(customHeader)) {
-    return resolveIp(headers.get(customHeader));
+    let ip = headers.get(customHeader);
+
+    // If it's x-forwarded-for or forwarded header, extract the first IP
+    if (customHeader === 'x-forwarded-for' && ip) {
+      ip = ip.split(',')?.[0]?.trim() || ip;
+    } else if (customHeader === 'forwarded' && ip) {
+      const match = ip.match(/for=(\[?[0-9a-fA-F:.]+\]?)/);
+      if (match) {
+        ip = match[1];
+      }
+    }
+
+    if (process.env.DEBUG_GEO) {
+      // eslint-disable-next-line no-console
+      console.log(`[IP] Using custom header ${customHeader}: ${ip}`);
+    }
+
+    return resolveIp(ip);
   }
 
-  const header = IP_ADDRESS_HEADERS.find(name => headers.get(name));
-  if (!header) {
-    return undefined;
+  // Debug: log all available IP-related headers
+  if (process.env.DEBUG_GEO) {
+    const availableHeaders: string[] = [];
+    IP_ADDRESS_HEADERS.forEach(name => {
+      const value = headers.get(name);
+      if (value) {
+        availableHeaders.push(`${name}=${value}`);
+      }
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[IP] Available IP headers: ${availableHeaders.join(', ') || 'none'}`);
   }
 
-  const ip = headers.get(header);
+  // Check headers in order, but skip private/internal IPs
+  let selectedHeader: string | undefined;
+  let selectedIp: string | null | undefined;
 
-  if (header === 'x-forwarded-for') {
-    return resolveIp(ip?.split(',')?.[0]?.trim());
+  for (const name of IP_ADDRESS_HEADERS) {
+    const value = headers.get(name);
+    if (!value) continue;
+
+    let extractedIp: string | null | undefined = value;
+
+    // Extract IP from x-forwarded-for (first IP in comma-separated list)
+    if (name === 'x-forwarded-for') {
+      extractedIp = value.split(',')?.[0]?.trim();
+    }
+
+    // Extract IP from forwarded header
+    if (name === 'forwarded') {
+      const match = value.match(/for=(\[?[0-9a-fA-F:.]+\]?)/);
+      if (match) {
+        extractedIp = match[1];
+      }
+    }
+
+    if (!extractedIp) continue;
+
+    // Skip private/internal IPs - they're not the real client IP
+    if (isPrivateIp(extractedIp)) {
+      if (process.env.DEBUG_GEO) {
+        // eslint-disable-next-line no-console
+        console.log(`[IP] Skipping private IP from ${name}: ${extractedIp}`);
+      }
+      continue; // Try next header
+    }
+
+    // Found a valid public IP
+    selectedHeader = name;
+    selectedIp = extractedIp;
+    break;
   }
 
-  if (header === 'forwarded') {
-    const match = ip.match(/for=(\[?[0-9a-fA-F:.]+]?)/);
-
-    if (match) {
-      return resolveIp(match[1]);
+  if (process.env.DEBUG_GEO) {
+    if (selectedHeader) {
+      // eslint-disable-next-line no-console
+      console.log(`[IP] Using header ${selectedHeader}: ${selectedIp}`);
+    } else {
+      // eslint-disable-next-line no-console
+      console.log(`[IP] No valid public IP address found in any header`);
     }
   }
 
-  return resolveIp(ip);
+  return selectedIp ? resolveIp(selectedIp) : null;
 }
 
 export function stripPort(ip?: string | null) {
