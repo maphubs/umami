@@ -238,6 +238,20 @@ describe('getIpAddress with TRUSTED_PROXIES', () => {
       '203.0.113.5',
     );
   });
+
+  // Fork: x-original-forwarded-for (ingress-nginx) is checked last and parsed as a chain
+  test('falls through to x-original-forwarded-for when other headers hold proxy IPs', () => {
+    vi.stubEnv('TRUSTED_PROXIES', 'private, loopback, linklocal');
+    expect(
+      getIpAddress(
+        headers({
+          'x-real-ip': '10.0.0.8',
+          'x-forwarded-for': '10.0.0.8',
+          'x-original-forwarded-for': '203.0.113.5, 10.0.0.9',
+        }),
+      ),
+    ).toBe('203.0.113.5');
+  });
 });
 
 describe('stripPort', () => {

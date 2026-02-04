@@ -14,6 +14,7 @@ export const IP_ADDRESS_HEADERS = [
   'x-client-ip',
   'x-cluster-client-ip',
   'x-forwarded',
+  'x-original-forwarded-for', // ingress-nginx: original chain before the proxy rewrote x-forwarded-for
 ];
 
 function normalizeIp(ip?: string | null) {
@@ -160,7 +161,7 @@ function pickFromChain(chain: (string | null)[]) {
 }
 
 function parseHeaderValue(header: string, value: string) {
-  if (header === 'x-forwarded-for') {
+  if (header === 'x-forwarded-for' || header === 'x-original-forwarded-for') {
     return pickFromChain(
       value
         .split(',')
